@@ -56,6 +56,10 @@ public:
   void rfm23_send(uint8_t data[], uint8_t len);
   void rfm23_receive(uint8_t data[], uint8_t len);
   uint8_t rfm23_get_packet_length();
+  void rfm23_set_freq(uint8_t fb,uint8_t fc_hi,uint8_t fc_lo);
+  void rfm23_set_deviation(uint8_t fdev);
+  void rfm23_set_modulation_type(uint8_t modtyp); //none, OOK, FSK, GFSK
+  void rfm23_set_datarate(uint8_t txdr_hi,uint8_t txdr_lo);
 
 
   // addressed send & receive functions

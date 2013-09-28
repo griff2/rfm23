@@ -6,23 +6,27 @@
 #include <stdio.h>
 #include "rfm23.h"
 
-// spi defines
+//                                    Arduino Pin#  <->  RFM23 Pin
+// spi defines       
 #define RFM23_SPI_PORT			PORTB
 #define RFM23_SPI_DDR			DDRB
 #define RFM23_SPI_PIN			PINB
-#define RFM23_SPI_MOSI			PINB3     // wired to rfm23 SDI (SPI data in)
-#define RFM23_SPI_MISO			PINB4     // wired to rfm23 SDO (SPI data out)
-#define RFM23_SPI_CLOCK			PINB5     // wired to rfm23 SCK (SPI clock in)
-#define RFM23_SPI_SELECT		PINB2     //wired to rfm23 nSEL (chip select in)
+#define RFM23_SPI_MOSI			PINB3         // 11 <-> SDI (SPI data in)
+#define RFM23_SPI_MISO			PINB4         // 12 <-> SDO (SPI data out)
+#define RFM23_SPI_CLOCK			PINB5         // 13 <-> SCK (SPI clock in)
+#define RFM23_SPI_SELECT		PINB2         // 10 <-> nSEL (chip select in)
 
-// nirq interrupt defines
-#define RFM23_NIRQ				PIND2     // wired to rfm23b nIRQ (int req out)
+// nIRQ interrupt defines. 
+#define RFM23_NIRQ				PIND2         // 2 <-> nIRQ (int req out)
 #define RFM23_NIRQ_PORT			PORTD
 #define RFM23_NIRQ_DDR			DDRD
 #define RFM23_NIRQ_PIN			PIND
 
+// Each of 16 RFM23 interrups is enabled by a bit in regs 5 & 6 (Int enable 
+// regs 1 & 2). POR setting: only enpor enabled. 
+// RFM23 sets nIRQ pin =0 until Arduino reads interrupt regs 3 and(or?) 4.
 
-// interrupt status register 1
+// RFM23 register 3(R): interrupt status register 1
 #define RFM23_03h_ISR1				0x03
 #define RFM23_03h_ISR1_IFFERR		0x00 | (1 << 7)
 #define RFM23_03h_ISR1_ITXFFAFULL	0x00 | (1 << 6)
@@ -33,7 +37,7 @@
 #define RFM23_03h_ISR1_IPKVALID		0x00 | (1 << 1)
 #define RFM23_03h_ISR1_ICRCERROR	0x00 | (1 << 0)
 
-// interrupt status register 2
+// RFM23 register 4(R): interrupt status register 2
 #define RFM23_04h_ISR2				0x04
 #define RFM23_04h_ISR2_ISWDET		0x00 | (1 << 7)
 #define RFM23_04h_ISR2_IPREAVAL		0x00 | (1 << 6)
@@ -44,21 +48,25 @@
 #define RFM23_04h_ISR2_ICHIPRDY		0x00 | (1 << 1)
 #define RFM23_04h_ISR2_IPOR			0x00 | (1 << 0)
 
-// interrupt enable 1 and 2
-// single bit are equal as in 03h
-// and 04h
+// RFM23 register 4(RW): Interrupt Enable 1
+// single bit are equal as in regs 3 and 4
 #define RFM23_05h_ENIR1				0x05
+// RFM23 register 5(RW): Interrupt Enable 2
 #define RFM23_06h_ENIR2				0x06
 
-
-// operating modes
+// RFM23 operating modes are set & read by register 7 (RW): 
+// IDLE (5 submodes: standby, sleeep, sensor, ready, tune), TX, RX.
+// Mode SHUTDOWN controlled by SDN pin, connected to gnd so never shutdown.
+// From standby, sleep, or sensor submode, 0.8ms delay to TX or RX.
+// From ready or tune submode, 0.2ms delay to TX or RX.
 #define RFM23_07h_OPMODE			0x07
+// Reg 7 bits:
 #define RFM23_07h_OPMODE_SWRES		0x00 | (1 << 7)
 #define RFM23_07h_OPMODE_ENLBD		0x00 | (1 << 6)
 #define RFM23_07h_OPMODE_ENWT		0x00 | (1 << 5)
 #define RFM23_07h_OPMODE_X32KSEL	0x00 | (1 << 4)
-#define RFM23_07h_OPMODE_TXON		0x00 | (1 << 3)
-#define RFM23_07h_OPMODE_RXON		0x00 | (1 << 2)
+#define RFM23_07h_OPMODE_TXON		0x00 | (1 << 3)    // 1->TX state
+#define RFM23_07h_OPMODE_RXON		0x00 | (1 << 2)    // 1->RX state
 #define RFM23_07h_OPMODE_PLLON		0x00 | (1 << 1)
 #define RFM23_07h_OPMODE_XTON		0x00 | (1 << 0)
 
@@ -74,63 +82,61 @@ rfm23::rfm23() {
 }
 // spi functions
 
+/*****Initialize Arduino's SPI bus to communicate with RFM23  ****/
 void rfm23::rfm23_spi_init() {
 	
-	// set mosi, select (ss/cs) and clock as output
-	RFM23_SPI_DDR = (1 << RFM23_SPI_MOSI) | (1 << RFM23_SPI_SELECT) | (1 << RFM23_SPI_CLOCK);
+	// set Arduino digital pins 11(mosi), 10(SS), and 13(SCK) as output
+	RFM23_SPI_DDR = (1 << RFM23_SPI_MOSI) | (1 << RFM23_SPI_SELECT) | 
+                   (1 << RFM23_SPI_CLOCK);
 	
-	// set miso as input
+	// set Arduino pin 12(miso) as input
 	RFM23_SPI_DDR &= ~(1 << RFM23_SPI_MISO);
 	
-	// select
+	// select the RFM23 module to communicate with, using SPI bus
 	rfm23_spi_select();
 	
 	// enable spi (SPE), set as master (MSTR) and set clock rate (SPR)
 	SPCR = (1 << SPE) | (1 << MSTR) | (1 << SPR1) | (1 << SPR0);
 }
 
-/* write spi */
+/* Write a byte to RFM23 using spi, wait for RFM23, then read RFM23 reply.*/
 uint8_t rfm23::rfm23_spi_write(uint8_t val) {
 	
-	// fill value into spi data register
+	// put value into SPI data register for writing to RFM23
 	SPDR = val;
 	
-	// wait
+	// wait for 8-bit reply data from RFM23 on Arduino's SPI bus.
 	while (!(SPSR & (1 << SPIF)));
 	
 	return (uint8_t)SPDR;
-	
 }
 
-/* select low */
+/* select the RFM23 module to communicate with, using SPI bus. */
 void rfm23::rfm23_spi_select() {
 	
-	// when module is selected,
-	// set SELECT to LOW
+	// Set Arduino pin 10 (SS) low to select RFM23 (Arduino pin 10 <-> nSEL)
 	RFM23_SPI_PORT &= ~(1 << RFM23_SPI_SELECT);
 }
 
-/* select high */
+/* unselect RFM23 on SPI bus */
 void rfm23::rfm23_spi_unselect() {
 	
-	// when module is unselected,
-	// set SELECT to HIGH
+	// Set Arduino pin 10 (SS) to hi to unselect RFM23 (Arduino pin 10 <-> nSEL)
 	RFM23_SPI_PORT |= (1 << RFM23_SPI_SELECT);
 }
 
-
 // general functions
 
-/* initialize rfm module */
+/* initialize Arduino & RFM23 module */
 void rfm23::rfm23_init() {
 	
-	// configure nirq port as input
+	// configure Arduino pin 2 (PIND2) (connected to RFM23 nIRQ pin) as input
 	RFM23_NIRQ_DDR &= ~(1 << RFM23_NIRQ);
 	
-	// init spi
+	// init spi between Arduino and RFM23
 	rfm23_spi_init();
 	
-	// read all interrupts
+	// read both RFM23 interrupt status registers (clears nIRQ interrupt req)
 	rfm23_read(RFM23_03h_ISR1);
 	rfm23_read(RFM23_04h_ISR2);
 	
@@ -138,19 +144,21 @@ void rfm23::rfm23_init() {
 	_delay_ms(16);
 }
 
-/* test read/write */
+/* test read/write  by momentarily writing and reading back RFM23 
+   Interrupt Enable 1 register (reg 5), compare data read back to write. 
+   Return 0xFF on success, 0x00 on failure. */
 uint8_t rfm23::rfm23_test() {
 	
-	uint8_t reg = 0x05;
-	uint8_t value = 0xEE;
+	uint8_t reg = 0x05;        // RFM23 Interrupt Enable register 1
+	uint8_t value = 0xEE;      // enables 6 of the 8 types of interrupts
 	
-	// read register
+	// read RFM23 Interrupt Enable register  1 (reg 5)
 	uint8_t val_orig = rfm23_read(reg);
 	
-	// write register
+	// write RFM23 Interrupt Enable register 1 (reg 5)
 	rfm23_write(reg, value);
 	
-	// read register
+	// read-back Interrupt Enable register 1 (reg 5)
 	uint8_t val_new = rfm23_read(reg);
 	
 	// set orig register value
@@ -173,38 +181,40 @@ void rfm23::rfm23_reset() {
 
 // read/write functions
 
-/* write to rfm registers */
+/* write 1 byte data to any specified RFM23 register */
 void rfm23::rfm23_write(uint8_t addr, uint8_t val) {
 	
-	// first bit 1 means write
-	addr |= (1 << 7);
+	// RFM23 SPI protocol: every interaction is 2 bytes: register address then 
+   // data.  Hi order bit of address=1 means write data byte to RFM23 register.
+	addr |= (1 << 7);    // insure hi-order bit of address is 1 (write)
 	
-	// select module
+	// select RFM23 module to communicate with over Arduino's SPI bus.
 	rfm23_spi_select();
 	
-	// write register address
+	// write '1' plus 7-bit register address to RFM23
 	rfm23_spi_write(addr);
 	
-	// write value
+	// write RFM23 register's data value.
 	rfm23_spi_write(val);
 	
 	// unselect module and finish operation
 	rfm23_spi_unselect();
 }
 
-/* read from rfm registers */
+/* read from any RFM23 register, return 1-byte data read. */
 uint8_t rfm23::rfm23_read(uint8_t addr) {
 	
-	// first bit 0 means read
-	addr &= ~(1 << 7);
+	// RFM23 SPI protocol: every interaction is 2 bytes: register address then 
+   // data.  First bit of address=0 means read register. Data byte unused.
+	addr &= ~(1 << 7);    // insure 1st bit of address is off.
 	
-	// select module
+	// select RFM23 module to communicate with using SPI bus.
 	rfm23_spi_select();
 	
-	// write register address
+	// write register address to RFM23
 	rfm23_spi_write(addr);
 	
-	// write dummy value
+	// write dummy value (00), and read data from selected RFM23 register.
 	uint8_t val = rfm23_spi_write(0x00);
 	
 	// unselect module and finish operation
@@ -213,16 +223,16 @@ uint8_t rfm23::rfm23_read(uint8_t addr) {
 	return val;
 }
 
-/* write to rfm registers in burst mode */
+/* write to a sequence of RFM23 registers in burst mode */
 void rfm23::rfm23_write_burst(uint8_t addr, uint8_t val[], uint8_t len) {
 
 	// first bit 1 means write
 	addr |= (1 << 7);
 	
-	// select module
-	rfm23_spi_select();
+	// select RFM23 module 
+	rfm23_spi_select();    // set RFM23 nSEL pin to 0.
 	
-	// write register address
+	// write (first) register address
 	rfm23_spi_write(addr);
 	
 	// write values
@@ -234,19 +244,19 @@ void rfm23::rfm23_write_burst(uint8_t addr, uint8_t val[], uint8_t len) {
 	rfm23_spi_unselect();
 }
 
-/* read from rfm registers in burst mode */
+/* read from RFM23 registers in burst mode */
 void rfm23::rfm23_read_burst(uint8_t addr, uint8_t val[], uint8_t len) {
 	
 	// first bit 0 means read
 	addr &= ~(1 << 7);
 	
-	// select module
-	rfm23_spi_select();
+	// select RFM23 module 
+	rfm23_spi_select();   // set Arduino pin D10 low (connects to RFM23 nSEL)
 	
 	// write register address
 	rfm23_spi_write(addr);
 	
-	// read values
+	// read values from sequential registers.
 	for (uint8_t i = 0; i < len; i++) {
 		val[i] = rfm23_spi_write(0x00);
 	}
@@ -258,7 +268,7 @@ void rfm23::rfm23_read_burst(uint8_t addr, uint8_t val[], uint8_t len) {
 
 // interrupt functions
 
-/* returns 0xFF when NIRQ-Pin is low = rfm interrupt */
+/* returns 0xFF when RFM23 nIRQ-Pin is low = rfm interrupt */
 uint8_t rfm23::rfm23_on_nirq() {
 	return !(RFM23_NIRQ_PIN & (1 << RFM23_NIRQ));
 }
@@ -267,7 +277,7 @@ uint8_t rfm23::rfm23_on_nirq() {
    interrupt is set once by rfm23_handle_interrupt()
    and will be reset when this function is called.
    
-   on_nirq() (or hardware interrupt) -> handle_interrupt()
+   on_nIRQ() (or hardware interrupt) -> handle_interrupt()
    -> on_interrupt()
   */
 uint8_t rfm23::rfm23_on_interrupt() {
@@ -332,7 +342,7 @@ void rfm23::rfm23_mode_ready() {
 	// go to READY mode
 	rfm23_write(RFM23_07h_OPMODE, RFM23_07h_OPMODE_XTON);
 	
-	// wait for module
+	// wait for RFM23 module
 	_delay_us(200);	
 }
 
@@ -349,7 +359,7 @@ void rfm23::rfm23_mode_rx() {
 /* mode TXON */
 void rfm23::rfm23_mode_tx() {
 	
-	// go to TXON mode
+	// go to TXON mode: turn on TX bit in RFM23 mode ctrl register 1
 	rfm23_write(RFM23_07h_OPMODE, RFM23_07h_OPMODE_TXON);
 	
 	// wait for module
@@ -393,24 +403,32 @@ void rfm23::rfm23_clear_txfifo() {
 }
 
 
-/*
-	send & receive functions
-*/
+/* send & receive functions */
 
-/* send data */
+/* send data packet (max len 64 bytes). Each packet contains:
+  preamble: 1-512 bytes  Set by Preamble Length reg 0x34 (default 8),
+                         and low order bit of reg 0x33 (default 0).
+                         Rx preamble threshold set by reg 0x35
+  sync word: 1-4 bytes   Length set by 2 bit "synclen" in reg 0x33.
+                         Sync words set by regs 0x36-0x39.
+  TX header: 0-4 bytes
+  Packet length: 0 or 1 byte
+  Data bytes
+  CRC: 0 or 2 bytes
+*/
 void rfm23::rfm23_send(uint8_t data[], uint8_t len) {
 	
 	// clear tx fifo
 	rfm23_clear_txfifo();
 	
-	// set packet length
-	rfm23_write(0x3e, len);
+	// write packet length 
+	rfm23_write(0x3e, len);   // set RFM23 Xmit Packet Length register
 	
-	// write data into fifo
+	// write packet data into tx-fifo (RFM23 FIFO access register 7F)
 	rfm23_write_burst(0x7f, data, len);
 
-	// send data
-	rfm23_write(0x07, 0x09);
+	// send data (Set TXON and XTON bits in Operating & Fctn Ctrl 1 register).
+	rfm23_write(0x07, 0x09); 
 }
 
 void rfm23::rfm23_send_addressed(uint8_t addr, uint8_t data[], uint8_t len) {
@@ -425,29 +443,57 @@ void rfm23::rfm23_send_addressed(uint8_t addr, uint8_t data[], uint8_t len) {
 void rfm23::rfm23_set_address(uint8_t addr) {
 	
 	// set sender address
-	rfm23_write(0x3A, addr);
+	rfm23_write(0x3A, addr);   // set Transmit Header 3 register
 	
 	// check header2 on receive
-	rfm23_write(0x40, addr);
+	rfm23_write(0x40, addr);   // set Check Header 2 register
 	
 	// only receive when header2 match
-	rfm23_write(0x32, 0x04);
+	rfm23_write(0x32, 0x04);   // set Header Ctrl 1 register
 }
 
-/* receive data */
-void rfm23::rfm23_receive(uint8_t data[], uint8_t len) {
+/* receive data from fx fifo*/
+void rfm23::rfm23_receive(uint8_t data[], uint8_t len) { //max len 64
 	rfm23_read_burst(0x7f, data, len);
 }
 
-/* get packet length */
+/* get RFM23 received packet length */
 uint8_t rfm23::rfm23_get_packet_length() {
-	return rfm23_read(0x4b);
+	return rfm23_read(0x4b);   // read Received Packet Length register
 }
 
+/* set frequency in 70cm band.*/
+void rfm23::rfm23_set_freq(uint8_t fb,uint8_t fc_hi,uint8_t fc_lo) {
+  // fb=19 for 430-439.9mhz (see RFM23 table 12). fc=25600(0x6400) for 434Mhz.
+  // Tx freq = 10Mhz*(fb+24+fc/64000)
+  rfm23_write(0x75,fb);   // write fb to Freq Band Select reg
+  // write 16-bit fc to the two Carrier Frequency registers
+  rfm23_write(0x76,fc_hi); 
+  rfm23_write(0x77,fc_lo); 
+}
 
-/*
-	wait functions
-*/
+void rfm23::rfm23_set_modulation_type(uint8_t modtyp) {
+   //modtyp: 0=none, 1=OOK, 2=FSK, 3=GFSK
+   rfm23_write(0x71,modtyp);  // write modtyp to Modulation Mode Ctrl 2 reg.
+}
+
+/* set frequency deviation */
+void rfm23::rfm23_set_deviation(uint8_t fdev) {
+   // peak deviation(khz) = fdev/0.625;
+   // write the deviation to the Frequency Deviation Register (default 51.2khz)
+   rfm23_write(0x72,fdev);
+}
+
+/* set tx data rate */
+void rfm23::rfm23_set_datarate(uint8_t txdr_hi,uint8_t txdr_lo) {
+   // above 30kbps: datarate(kbps)=txdr*1Mhz/65536
+   //               txdr=datarate(kbps)*65535/1Mhz  POR rate=40mbps.
+   // write the 16bit datarate into the two TX Data Rate registers
+  rfm23_write(0x6E,txdr_hi); 
+  rfm23_write(0x6F,txdr_lo);
+}
+
+/* wait functions */
 
 /* wait for IPKSENT interrupt */
 /* @TODO */
@@ -464,11 +510,7 @@ void rfm23::rfm23_wait_packet_sent(uint8_t timeout) {
 	}
 }
 
-
-
-/*
-	other functions
-*/
+/* other functions */
 
 /* get temperature
    temp = return_value * 0.5 - 64
